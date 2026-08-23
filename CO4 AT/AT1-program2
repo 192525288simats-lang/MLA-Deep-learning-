@@ -1,0 +1,129 @@
+import torch
+import torch.nn as nn
+import torchvision.models as models
+import torch.nn.functional as F
+
+
+class DenseNetPixelNetSeg(nn.Module):
+
+    def __init__(self, num_classes=19):
+        super().__init__()
+
+        densenet = models.densenet121(
+            weights="IMAGENET1K_V1"
+        )
+
+        features = densenet.features
+
+        # Encoder stages
+        self.stage1 = nn.Sequential(
+            features.conv0,
+            features.norm0,
+            features.relu0,
+            features.pool0
+        )
+
+        self.stage2 = nn.Sequential(
+            features.denseblock1,
+            features.transition1
+        )
+
+        self.stage3 = nn.Sequential(
+            features.denseblock2,
+            features.transition2
+        )
+
+        self.stage4 = nn.Sequential(
+            features.denseblock3,
+            features.transition3
+        )
+
+        self.stage5 = nn.Sequential(
+            features.denseblock4,
+            features.norm5
+        )
+
+        # Projection layers
+        self.proj1 = nn.Conv2d(64, 64, 1)
+        self.proj2 = nn.Conv2d(128, 64, 1)
+        self.proj3 = nn.Conv2d(256, 64, 1)
+        self.proj4 = nn.Conv2d(512, 64, 1)
+        self.proj5 = nn.Conv2d(1024, 64, 1)
+
+        # Pixel classifier
+        self.pixel_classifier = nn.Sequential(
+            nn.Conv2d(64 * 5, 256, kernel_size=1),
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(256, 128, kernel_size=1),
+            nn.ReLU(inplace=True),
+
+            nn.Conv2d(
+                128,
+                num_classes,
+                kernel_size=1
+            )
+        )
+
+    def forward(self, x):
+
+        H, W = x.shape[2], x.shape[3]
+
+        f1 = self.stage1(x)
+        f2 = self.stage2(f1)
+        f3 = self.stage3(f2)
+        f4 = self.stage4(f3)
+        f5 = self.stage5(f4)
+
+        # Upsampling function
+        up = lambda t: F.interpolate(
+            t,
+            size=(H, W),
+            mode="bilinear",
+            align_corners=False
+        )
+
+        # Hypercolumn
+        hyper = torch.cat([
+            up(self.proj1(f1)),
+            up(self.proj2(f2)),
+            up(self.proj3(f3)),
+            up(self.proj4(f4)),
+            up(self.proj5(f5))
+        ], dim=1)
+
+        # Pixel-wise prediction
+        logits = self.pixel_classifier(hyper)
+
+        return logits
+
+
+# Create model
+model = DenseNetPixelNetSeg(num_classes=19)
+
+# Loss function
+criterion = nn.CrossEntropyLoss(
+    ignore_index=255
+)
+
+# Optimizer
+optimizer = torch.optim.Adam(
+    model.parameters(),
+    lr=1e-4
+)
+
+
+# Training step
+def train_step(image, mask):
+
+    optimizer.zero_grad()
+
+    logits = model(image)
+
+    loss = criterion(logits, mask)
+
+    loss.backward()
+
+    optimizer.step()
+
+    return loss.item()
