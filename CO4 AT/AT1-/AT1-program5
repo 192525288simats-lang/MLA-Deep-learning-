@@ -1,0 +1,194 @@
+import numpy as np
+import cv2
+
+from tensorflow.keras.applications import InceptionV3
+
+from tensorflow.keras.applications.inception_v3 import (
+    preprocess_input
+)
+
+from tensorflow.keras.layers import (
+    Input,
+    LSTM,
+    Embedding,
+    Dense,
+    Concatenate,
+    Attention
+)
+
+from tensorflow.keras.models import Model
+
+
+# ---------------- CNN Feature Extractor ----------------
+
+cnn_base = InceptionV3(
+    weights="imagenet",
+    include_top=False,
+    pooling="avg"
+)
+
+# Freeze CNN
+cnn_base.trainable = False
+
+
+# Extract video frame features
+def extract_frame_features(
+    video_path,
+    num_frames=30
+):
+
+    cap = cv2.VideoCapture(
+        video_path
+    )
+
+    total = int(
+        cap.get(
+            cv2.CAP_PROP_FRAME_COUNT
+        )
+    )
+
+    idxs = np.linspace(
+        0,
+        total - 1,
+        num_frames
+    ).astype(int)
+
+    frames = []
+
+    for i in idxs:
+
+        cap.set(
+            cv2.CAP_PROP_POS_FRAMES,
+            i
+        )
+
+        ok, frame = cap.read()
+
+        if not ok:
+            continue
+
+        frame = cv2.resize(
+            frame,
+            (299, 299)
+        )
+
+        frame = preprocess_input(
+            frame.astype("float32")
+        )
+
+        frames.append(frame)
+
+    cap.release()
+
+    frames = np.array(frames)
+
+    features = cnn_base.predict(
+        frames,
+        verbose=0
+    )
+
+    return features
+
+
+# ---------------- LSTM Encoder-Decoder ----------------
+
+FEAT_DIM = 2048
+UNITS = 512
+VOCAB = 10000
+EMBED_DIM = 256
+
+
+# Encoder
+encoder_inputs = Input(
+    shape=(None, FEAT_DIM),
+    name="frame_features"
+)
+
+encoder_lstm = LSTM(
+    UNITS,
+    return_sequences=True,
+    return_state=True
+)
+
+enc_outputs, state_h, state_c = \
+    encoder_lstm(encoder_inputs)
+
+
+# Decoder
+decoder_inputs = Input(
+    shape=(None,),
+    name="caption_input"
+)
+
+dec_emb = Embedding(
+    VOCAB,
+    EMBED_DIM,
+    mask_zero=True
+)(decoder_inputs)
+
+
+decoder_lstm = LSTM(
+    UNITS,
+    return_sequences=True,
+    return_state=True
+)
+
+dec_outputs, _, _ = decoder_lstm(
+    dec_emb,
+    initial_state=[
+        state_h,
+        state_c
+    ]
+)
+
+
+# Attention
+attention = Attention()
+
+context = attention(
+    [dec_outputs, enc_outputs]
+)
+
+
+# Combine decoder output and context
+merged = Concatenate()(
+    [dec_outputs, context]
+)
+
+
+# Output vocabulary
+decoder_dense = Dense(
+    VOCAB,
+    activation="softmax"
+)
+
+outputs = decoder_dense(
+    merged
+)
+
+
+# Create caption model
+caption_model = Model(
+    [encoder_inputs, decoder_inputs],
+    outputs
+)
+
+
+caption_model.compile(
+    optimizer="adam",
+    loss="sparse_categorical_crossentropy"
+)
+
+
+caption_model.summary()
+
+
+# Training
+# video_features = extract_frame_features(video_path)
+
+# caption_model.fit(
+#     [video_features, caption_seq_in],
+#     caption_seq_out,
+#     batch_size=32,
+#     epochs=30
+# )
